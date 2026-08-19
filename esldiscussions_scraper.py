@@ -535,6 +535,7 @@ def main():
     success = 0
     failed = 0
     skipped = 0
+    max_retries = 3
 
     for i, url in enumerate(urls[start_idx:], start=start_idx + 1):
         if args.limit and (i - start_idx) > args.limit:
@@ -546,12 +547,21 @@ def main():
             continue
 
         print(f"\n[{i}/{len(urls)}] ", end="")
-        result = scrape_lesson(url, db, code_gen, session)
 
-        if result.get("status") == "success":
-            success += 1
-        else:
-            failed += 1
+        # Retry loop for transient failures
+        for attempt in range(1, max_retries + 1):
+            result = scrape_lesson(url, db, code_gen, session)
+            if result.get("status") == "success":
+                success += 1
+                break
+            else:
+                if attempt < max_retries:
+                    wait = 5 * attempt
+                    print(f"    ⚠ Attempt {attempt}/{max_retries} failed, retrying in {wait}s...")
+                    time.sleep(wait)
+                else:
+                    print(f"    ✗ FAILED after {max_retries} attempts: {result.get('error', 'unknown')}")
+                    failed += 1
 
         # Random sleep between requests
         sleep_time = random.uniform(0.5, 1.5)
