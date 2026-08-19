@@ -24,7 +24,7 @@ import time
 import random
 from datetime import date, datetime
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -150,23 +150,61 @@ def extract_tags(topic: str) -> str:
 
 
 def extract_body_html(soup: BeautifulSoup) -> str:
-    """Extract the full discussion questions as limited HTML."""
+    """Extract the discussion questions as restricted HTML (a, p, strong, li, i, ul, ol, h1, h2, h3)."""
     body = soup.find("body")
     if not body:
         return ""
-    # The discussion content is the main text
-    # We want to extract the Q&A structure
-    text = body.get_text(separator="\n", strip=True)
-    # Find the discussion section
-    lines = text.split("\n")
-    discussion_lines = []
-    in_discussion = False
-    for line in lines:
-        if "THE DISCUSSION ON" in line.upper():
-            in_discussion = True
-        if in_discussion:
-            discussion_lines.append(line)
-    return "\n".join(discussion_lines)
+
+    # The discussion content is inside an <article> tag
+    article = body.find("article")
+    if not article:
+        # Fallback: find the section starting with THE DISCUSSION ON
+        for el in body.find_all(["h3", "h2", "strong"]):
+            if "THE DISCUSSION ON" in el.get_text(strip=True).upper():
+                parent = el.find_parent(["div", "td", "section"])
+                if parent:
+                    article = parent
+                    break
+
+    if not article:
+        return ""
+
+    # Get the HTML, clean it
+    raw_html = str(article)
+    soup_article = BeautifulSoup(raw_html, "lxml")
+    # Remove unwanted elements
+    for tag in soup_article.find_all(["script", "iframe", "style", "img", "br"]):
+        tag.decompose()
+    # Convert em to i
+    for em in soup_article.find_all("em"):
+        em.name = "i"
+    # Clean links
+    for a in soup_article.find_all("a"):
+        href = a.get("href", "")
+        a.attrs = {"href": href}
+        a["target"] = "_blank"
+        a["rel"] = "nofollow noopener noreferrer"
+    # Keep only allowed tags, unwrap the rest
+    allowed = {"a", "p", "strong", "li", "i", "ul", "ol", "h1", "h2", "h3",
+               "table", "tr", "td", "th", "thead", "tbody", "article"}
+    for tag in soup_article.find_all(True):
+        if tag.name not in allowed:
+            tag.unwrap()
+
+    return str(soup_article)
+
+
+def build_download_folder_name(title: str, resource_code: str) -> str:
+    """Build folder name: sanitized_full_title_resource_code"""
+    sanitized = sanitize_folder_name(title)
+    return f"{sanitized}_{resource_code}"
+
+
+def build_file_name(component_type: str, folder_name: str, ext: str) -> str:
+    """Build file name: component_type_folder_name.extension"""
+    # folder_name contains the resource_code; strip it for the file name base
+    base = folder_name.rsplit("_", 1)[0]  # remove the resource_code suffix
+    return f"{component_type}_{base}.{ext}"
 
 
 def extract_asset_urls(soup: BeautifulSoup, page_url: str) -> dict:
@@ -270,7 +308,7 @@ def scrape_lesson(url: str, db: DB, code_gen: ResourceCodeGenerator, session: re
     resource_code = code_gen.get_next_resource_code()
 
     # Sanitize folder name
-    folder_name = f"{sanitize_folder_name(topic)}_{resource_code}"
+    folder_name = build_download_folder_name(title, resource_code)
     download_folder = Path(DOWNLOAD_DIR) / folder_name
 
     # Asset URLs
@@ -325,7 +363,7 @@ def scrape_lesson(url: str, db: DB, code_gen: ResourceCodeGenerator, session: re
         asset_code = f"{resource_code}_AS{(len(assets) + 1):02d}"
         orig_filename = f"{topic_slug}.{ext}"
         sanitized_name = f"student_{sanitize_filename(topic)}"
-        final_filename = f"{sanitized_name}.{ext}"
+        final_filename = build_file_name("student", folder_name, ext)
         dest_path = download_folder / final_filename
 
         dl_result = download_asset(url, dest_path)
