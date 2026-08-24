@@ -422,6 +422,11 @@ class DB:
 
     # ── Generic insert helpers ──────────────────────────────────────────────────
     def insert_resource(self, data: dict):
+        # Ensure text fields are always str, not bytes
+        for text_field in ("body_html", "body_wp", "overview", "objective", "notes_local"):
+            if text_field in data and data[text_field] is not None:
+                if isinstance(data[text_field], bytes):
+                    data[text_field] = data[text_field].decode("utf-8", errors="replace")
         cols = [f for f in self.RESOURCE_FIELDS if f in data]
         placeholders = ", ".join(["?"] * len(cols))
         sql = f"INSERT INTO resource ({', '.join(cols)}) VALUES ({placeholders})"

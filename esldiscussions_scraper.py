@@ -156,9 +156,10 @@ def extract_body_html(soup: BeautifulSoup) -> str:
         return ""
 
     raw_html = str(article)
-    soup_article = BeautifulSoup(raw_html, "lxml") if raw_html.strip() else None
-    if not soup_article:
+    if not raw_html.strip():
         return ""
+
+    soup_article = BeautifulSoup(raw_html, "lxml")
 
     for tag in soup_article.find_all(["script", "iframe", "style", "img", "br"]):
         tag.decompose()
@@ -176,7 +177,9 @@ def extract_body_html(soup: BeautifulSoup) -> str:
         if tag.name not in allowed:
             tag.unwrap()
 
-    return str(soup_article)
+    # Ensure return value is always a str, not bytes
+    result = str(soup_article)
+    return result if isinstance(result, str) else result.decode("utf-8", errors="replace")
 
 
 def build_download_folder_name(title: str, resource_code: str) -> str:
