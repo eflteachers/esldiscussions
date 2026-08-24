@@ -25,6 +25,11 @@ BASE_URL = "https://esldiscussions.com"
 OUTPUT_FILE = "urls.txt"
 
 # Static/utility pages to skip
+URL_OVERRIDES = {
+    "https://esldiscussions.com/r/russia.pdf": "https://esldiscussions.com/r/russia.html",
+}
+
+
 SKIP_PATHS = {
     "/",
     "/copyright.html",

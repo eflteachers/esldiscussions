@@ -2,10 +2,11 @@
 """
 global_db.py
 ────────────
-Shared SQLite schema for RF scrapers (new schema with resource_code).
+Shared SQLite schema for RF scrapers (new schema v2 — Aug 2026).
 
 Fields are grouped by table and listed in the exact insertion order
-expected by WordPress / JetEngine.
+expected by WordPress / JetEngine. This file is the source of truth
+for database structure across all RF scrapers.
 """
 import sqlite3
 from pathlib import Path
@@ -28,6 +29,10 @@ class DB:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 uuid TEXT NOT NULL UNIQUE,
                 resource_code TEXT,
+                source_code TEXT,
+                source_name TEXT,
+                source_series_code TEXT,
+                sequence TEXT,
                 parent_uuid TEXT,
                 source_url TEXT,
                 validation_status TEXT,
@@ -41,11 +46,12 @@ class DB:
                 directory_type TEXT,
                 input_genre TEXT,
                 resource_form_local TEXT,
+                lesson_type TEXT,
+                lesson_type_local TEXT,
                 pd_type TEXT,
                 reference_type TEXT,
                 research_type TEXT,
                 tool_type TEXT,
-                is_learning_path INTEGER,
                 server TEXT,
                 status TEXT,
                 wordpress_post_id INTEGER,
@@ -61,7 +67,6 @@ class DB:
                 body_wp TEXT,
                 buy_collection TEXT,
                 category_local TEXT,
-                content_type TEXT,
                 content_type_local TEXT,
                 count_audio INTEGER,
                 count_document INTEGER,
@@ -70,7 +75,6 @@ class DB:
                 count_video INTEGER,
                 date TEXT,
                 date_1st_scraped TEXT,
-                date_scraped TEXT,
                 date_updated TEXT,
                 dl_audio TEXT,
                 dl_docs TEXT,
@@ -92,8 +96,6 @@ class DB:
                 file_extension TEXT,
                 focus TEXT,
                 focus_local TEXT,
-                format TEXT,
-                format_local TEXT,
                 framework TEXT,
                 function TEXT,
                 function_local TEXT,
@@ -115,6 +117,7 @@ class DB:
                 is_deleted INTEGER,
                 is_free INTEGER,
                 is_game INTEGER,
+                is_learning_path INTEGER,
                 is_printable INTEGER,
                 language TEXT,
                 lesson_time TEXT,
@@ -124,8 +127,6 @@ class DB:
                 lesson_topic TEXT,
                 lesson_topic_local TEXT,
                 lesson_topic_locked INTEGER,
-                lesson_type TEXT,
-                lesson_type_local TEXT,
                 media_type TEXT,
                 media_type_local TEXT,
                 material_origin TEXT,
@@ -160,7 +161,6 @@ class DB:
                 tags TEXT,
                 video_downloaded_local INTEGER,
                 video_duration_cat TEXT,
-                website TEXT,
                 whiteboard_url TEXT,
                 whiteboard_url_local TEXT
             )
@@ -320,7 +320,7 @@ class DB:
             """
         )
 
-        # ── resource_relationship (new table per client point 14) ────────────────
+        # ── resource_relationship ────────────────────────────────────────────────
         c.execute(
             """
             CREATE TABLE IF NOT EXISTS resource_relationship (
@@ -338,40 +338,44 @@ class DB:
 
     # ── Field lists (must match CREATE TABLE column order) ──────────────────────
     RESOURCE_FIELDS = [
-        "uuid", "resource_code", "parent_uuid", "source_url",
+        "uuid", "resource_code", "source_code", "source_name",
+        "source_series_code", "sequence", "parent_uuid", "source_url",
         "validation_status", "needs_review", "source_id", "title",
-        "level", "resource_type", "resource_form", "assessment_type", "directory_type", "input_genre", "resource_form_local", "pd_type", "reference_type", "research_type", "tool_type", "is_learning_path", "server", "status",
+        "level", "resource_type", "resource_form", "assessment_type",
+        "directory_type", "input_genre", "resource_form_local",
+        "lesson_type", "lesson_type_local", "pd_type", "reference_type",
+        "research_type", "tool_type", "server", "status",
         "wordpress_post_id", "activity_type", "activity_type_local",
         "age_group", "age_group_local", "audience", "audience_local",
         "audio_duration_cat", "author_local", "body_html", "body_wp",
-        "buy_collection", "category_local", "content_type", "content_type_local",
+        "buy_collection", "category_local", "content_type_local",
         "count_audio", "count_document", "count_presentation", "count_total",
-        "count_video", "date", "date_1st_scraped", "date_scraped",
-        "date_updated", "dl_audio", "dl_docs", "dl_files", "dl_folder",
-        "dl_video1080", "dl_video720", "domain", "domain_local",
-        "download_folder_name", "english_variety", "esp", "event",
-        "event_local", "exam_local", "exam", "featured_image",
-        "featured_image_local", "file_extension", "focus", "focus_local",
-        "format", "format_local", "framework", "function",
+        "count_video", "date", "date_1st_scraped", "date_updated",
+        "dl_audio", "dl_docs", "dl_files", "dl_folder", "dl_video1080",
+        "dl_video720", "domain", "domain_local", "download_folder_name",
+        "english_variety", "esp", "event", "event_local", "exam_local",
+        "exam", "featured_image", "featured_image_local", "file_extension",
+        "focus", "focus_local", "framework", "function",
         "function_local", "function_locked", "grammar", "grammar_local",
         "grammar_locked", "has_answer", "has_audio", "has_presentation",
-        "has_teacher", "has_video", "html_created_local", "interaction_pattern",
-        "interactivity", "interactive_platform", "is_ai_generated",
-        "is_collection", "is_deleted", "is_free", "is_game",
-        "is_printable", "language", "lesson_time", "lesson_topic_a1",
-        "lesson_topic_a1_local", "lesson_topic_a1_locked", "lesson_topic",
-        "lesson_topic_local", "lesson_topic_locked", "lesson_type",
-        "lesson_type_local", "media_type", "media_type_local",
+        "has_teacher", "has_video", "html_created_local",
+        "interaction_pattern", "interactivity", "interactive_platform",
+        "is_ai_generated", "is_collection", "is_deleted", "is_free",
+        "is_game", "is_learning_path", "is_printable", "language",
+        "lesson_time", "lesson_topic_a1", "lesson_topic_a1_local",
+        "lesson_topic_a1_locked", "lesson_topic", "lesson_topic_local",
+        "lesson_topic_locked", "media_type", "media_type_local",
         "material_origin", "notes_local", "objective", "overview",
-        "popularity_score", "popularity_rate_local", "popularity_rate_max_local",
-        "popularity_likes_local", "presentation_downloaded_local",
-        "presentation_url", "presentation_url_local", "purpose",
-        "situation", "situation_local", "situation_locked",
-        "size_1080", "size_1080_bytes", "size_720", "size_720_bytes",
-        "size_audio", "size_audio_bytes", "size_doc", "size_doc_bytes",
-        "size_files", "size_files_bytes", "skill", "skill_local",
-        "stage", "tags_local", "tags", "video_downloaded_local",
-        "video_duration_cat", "website", "whiteboard_url", "whiteboard_url_local",
+        "popularity_score", "popularity_rate_local",
+        "popularity_rate_max_local", "popularity_likes_local",
+        "presentation_downloaded_local", "presentation_url",
+        "presentation_url_local", "purpose", "situation", "situation_local",
+        "situation_locked", "size_1080", "size_1080_bytes", "size_720",
+        "size_720_bytes", "size_audio", "size_audio_bytes", "size_doc",
+        "size_doc_bytes", "size_files", "size_files_bytes", "skill",
+        "skill_local", "stage", "tags_local", "tags",
+        "video_downloaded_local", "video_duration_cat",
+        "whiteboard_url", "whiteboard_url_local",
     ]
 
     RESOURCE_VALIDATION_FIELDS = [

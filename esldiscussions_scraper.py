@@ -2,7 +2,7 @@
 """
 esldiscussions_scraper.py
 ─────────────────────────
-Main scraper for esldiscussions.com.
+Main scraper for esldiscussions.com (v2 — Aug 2026 schema).
 
 Scrapes lesson pages from urls.txt (oldest first), extracts metadata,
 downloads PDF + Word assets, and populates the SQLite database.
@@ -11,7 +11,6 @@ Usage:
     python3 esldiscussions_scraper.py                    # Full scrape
     python3 esldiscussions_scraper.py --resume           # Resume from last
     python3 esldiscussions_scraper.py --limit 5          # First 5 only
-    python3 esldiscussions_scraper.py --range 000001-000010  # Specific range
     python3 esldiscussions_scraper.py --update           # Update mode (skip existing)
 """
 
@@ -39,14 +38,22 @@ from global_resource_code_generator import ResourceCodeGenerator
 # ── Constants ────────────────────────────────────────────────────────────────
 SITE_CODE = "000021"
 SERIES_CODE = "01"
-WEBSITE = "esldiscussions"
+SOURCE_NAME = "esldiscussions"
 BASE_URL = "https://esldiscussions.com"
 URLS_FILE = "urls.txt"
-DB_FILE = f"{WEBSITE}.db"
-DOWNLOAD_DIR = "downloads"
+DB_FILE = f"{SOURCE_NAME}.db"
+DATA_DIR = Path("data") / SERIES_CODE
+DOWNLOAD_DIR = DATA_DIR / "downloads"
 TODAY = date.today().isoformat()
 NOW = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+
+# URL override map for special cases (hardcoded fixes)
+URL_OVERRIDES = {
+    # russia page links to PDF instead of HTML
+    "https://esldiscussions.com/r/russia.pdf": "https://esldiscussions.com/r/russia.html",
+}
+
 
 # ── Constant field values (from mapping sheet) ───────────────────────────────
 CONSTANTS = {
@@ -70,7 +77,7 @@ CONSTANTS = {
     "domain": "ESL",
     "english_variety": "British",
     "focus": "speaking",
-    "function": "expressing opinions, comparing, speculating/predicting, asking for and giving information",
+    "function": None,
     "function_locked": 0,
     "grammar_locked": 0,
     "has_answer": 0,
@@ -95,7 +102,13 @@ CONSTANTS = {
     "purpose": "ge",
     "skill": "speaking",
     "stage": "group discussion",
-    "website": WEBSITE,
+    "source_code": SITE_CODE,
+    "source_name": SOURCE_NAME,
+    "source_series_code": SERIES_CODE,
+    "objective": None,
+    "notes_local": None,
+    "overview": None,
+    "function": None,
 }
 
 
@@ -103,7 +116,7 @@ def extract_topic(source_url: str) -> str:
     """Extract topic name from URL like /z/zambia.html → 'Zambia'."""
     path = urlparse(source_url).path
     name = path.rstrip(".html").rsplit("/", 1)[-1]
-    # Handle hyphens and special cases
+    # Normalize: replace hyphens/underscores with spaces, title case
     name = name.replace("-", " ").replace("_", " ").title()
     return name
 
@@ -113,40 +126,15 @@ def extract_title(soup: BeautifulSoup, topic: str) -> str:
     return f"English Discussion on {topic}"
 
 
-def extract_overview(topic: str) -> str:
-    """Generate overview text based on topic."""
-    return (
-        f"A printable split-pair speaking activity with 10 different open-ended "
-        f"{topic} questions for each partner."
-    )
-
-
-def extract_objective(topic: str) -> str:
-    """Generate objective text based on topic."""
-    return (
-        f"Learners discuss {topic}'s geography, history, culture, people, "
-        f"tourism, international relations, and possible future."
-    )
-
-
-def extract_notes(topic: str) -> str:
-    """Generate notes_local."""
-    return (
-        f"Two parallel sets of 10 open-ended questions for Student A and "
-        f"Student B about {topic}."
-    )
-
-
 def extract_lesson_topic(topic: str) -> str:
-    """Generate lesson_topic value."""
-    return f"{topic}, countries and cultures, geography, history, travel and tourism"
+    """Generate lesson_topic value based on the topic."""
+    # Generic topics common to all discussion lessons
+    return f"{topic}, countries and cultures, geography, history, travel and tourism, discussion questions"
 
 
 def extract_tags(topic: str) -> str:
     """Generate tags value."""
-    return (
-        f"{topic}, culture, geography, history, travel, tourism, discussion questions"
-    )
+    return f"{topic}, culture, geography, history, travel, tourism, discussion questions"
 
 
 def extract_body_html(soup: BeautifulSoup) -> str:
@@ -155,10 +143,8 @@ def extract_body_html(soup: BeautifulSoup) -> str:
     if not body:
         return ""
 
-    # The discussion content is inside an <article> tag
     article = body.find("article")
     if not article:
-        # Fallback: find the section starting with THE DISCUSSION ON
         for el in body.find_all(["h3", "h2", "strong"]):
             if "THE DISCUSSION ON" in el.get_text(strip=True).upper():
                 parent = el.find_parent(["div", "td", "section"])
@@ -169,22 +155,21 @@ def extract_body_html(soup: BeautifulSoup) -> str:
     if not article:
         return ""
 
-    # Get the HTML, clean it
     raw_html = str(article)
-    soup_article = BeautifulSoup(raw_html, "lxml")
-    # Remove unwanted elements
+    soup_article = BeautifulSoup(raw_html, "lxml") if raw_html.strip() else None
+    if not soup_article:
+        return ""
+
     for tag in soup_article.find_all(["script", "iframe", "style", "img", "br"]):
         tag.decompose()
-    # Convert em to i
     for em in soup_article.find_all("em"):
         em.name = "i"
-    # Clean links
     for a in soup_article.find_all("a"):
-        href = a.get("href", "")
+        href = a.get("href", "") or ""
         a.attrs = {"href": href}
         a["target"] = "_blank"
         a["rel"] = "nofollow noopener noreferrer"
-    # Keep only allowed tags, unwrap the rest
+
     allowed = {"a", "p", "strong", "li", "i", "ul", "ol", "h1", "h2", "h3",
                "table", "tr", "td", "th", "thead", "tbody", "article"}
     for tag in soup_article.find_all(True):
@@ -200,11 +185,10 @@ def build_download_folder_name(title: str, resource_code: str) -> str:
     return f"{sanitized}_{resource_code}"
 
 
-def build_file_name(component_type: str, folder_name: str, ext: str) -> str:
-    """Build file name: component_type_folder_name.extension"""
-    # folder_name contains the resource_code; strip it for the file name base
-    base = folder_name.rsplit("_", 1)[0]  # remove the resource_code suffix
-    return f"{component_type}_{base}.{ext}"
+def build_file_name(component_type: str, title: str) -> str:
+    """Build file name: component_type_sanitized_title.extension"""
+    sanitized = sanitize_filename(title)
+    return f"{component_type}_{sanitized}"
 
 
 def extract_asset_urls(soup: BeautifulSoup, page_url: str) -> dict:
@@ -213,9 +197,9 @@ def extract_asset_urls(soup: BeautifulSoup, page_url: str) -> dict:
     for a_tag in soup.find_all("a", href=True):
         href = a_tag["href"]
         text = a_tag.get_text(strip=True).lower()
-        # Resolve relative URLs against page URL
-        from urllib.parse import urljoin
         full_url = urljoin(page_url, href)
+        # Apply URL overrides
+        full_url = URL_OVERRIDES.get(full_url, full_url)
         if full_url.endswith(".pdf"):
             assets["pdf"] = full_url
         elif full_url.endswith(".doc") and "pdf" not in text:
@@ -244,7 +228,6 @@ def download_asset(url: str, dest_path: Path) -> dict:
             result["download_status"] = "failed"
             return result
 
-        # Write to temp file
         temp_path.parent.mkdir(parents=True, exist_ok=True)
         sha256 = hashlib.sha256()
         with open(temp_path, "wb") as f:
@@ -260,7 +243,6 @@ def download_asset(url: str, dest_path: Path) -> dict:
             result["download_status"] = "failed"
             return result
 
-        # Rename temp to final
         temp_path.rename(dest_path)
         result["checksum"] = sha256.hexdigest()
         result["file_exists"] = 1
@@ -272,19 +254,10 @@ def download_asset(url: str, dest_path: Path) -> dict:
     return result
 
 
-def compute_sha256(file_path: Path) -> str:
-    sha256 = hashlib.sha256()
-    with open(file_path, "rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            sha256.update(chunk)
-    return sha256.hexdigest()
-
-
 def scrape_lesson(url: str, db: DB, code_gen: ResourceCodeGenerator, session: requests.Session) -> dict:
     """Scrape a single lesson page and return all field values."""
     print(f"  Scraping: {url}")
 
-    # Fetch page
     try:
         resp = session.get(url, headers={"User-Agent": USER_AGENT}, timeout=30)
         resp.raise_for_status()
@@ -295,21 +268,17 @@ def scrape_lesson(url: str, db: DB, code_gen: ResourceCodeGenerator, session: re
     soup = BeautifulSoup(resp.text, "lxml")
     http_status = resp.status_code
 
-    # Extract topic from URL
     topic = extract_topic(url)
     topic_slug = url.rstrip(".html").rsplit("/", 1)[-1]
-    letter = urlparse(url).path.split("/")[1]
 
-    # Extract title
     title = extract_title(soup, topic)
-
-    # Generate UUID and resource_code
     resource_uuid = uuid7()
     resource_code = code_gen.get_next_resource_code()
+    sequence = resource_code[-6:]
 
-    # Sanitize folder name
+    # Build folder name
     folder_name = build_download_folder_name(title, resource_code)
-    download_folder = Path(DOWNLOAD_DIR) / folder_name
+    download_folder = DOWNLOAD_DIR / folder_name
 
     # Asset URLs
     asset_urls = extract_asset_urls(soup, url)
@@ -321,16 +290,16 @@ def scrape_lesson(url: str, db: DB, code_gen: ResourceCodeGenerator, session: re
     resource_data = {
         "uuid": resource_uuid,
         "resource_code": resource_code,
+        "source_code": SITE_CODE,
+        "source_name": SOURCE_NAME,
+        "source_series_code": SERIES_CODE,
+        "sequence": sequence,
         "source_url": url,
         "title": title,
         "date": TODAY,
         "date_1st_scraped": TODAY,
-        "date_scraped": TODAY,
         "download_folder_name": folder_name,
         "body_html": body_html,
-        "overview": extract_overview(topic),
-        "objective": extract_objective(topic),
-        "notes_local": extract_notes(topic),
         "lesson_topic": extract_lesson_topic(topic),
         "tags": extract_tags(topic),
         "file_extension": None,
@@ -340,10 +309,6 @@ def scrape_lesson(url: str, db: DB, code_gen: ResourceCodeGenerator, session: re
         "size_doc_bytes": None,
         "size_files": None,
         "size_files_bytes": None,
-        "site_code": SITE_CODE,
-        "source_code": SITE_CODE,
-        "source_series_code": SERIES_CODE,
-        "sequence": resource_code[-6:],
     }
     resource_data.update(CONSTANTS)
 
@@ -352,8 +317,8 @@ def scrape_lesson(url: str, db: DB, code_gen: ResourceCodeGenerator, session: re
     total_size = 0
     extensions = set()
 
-    for asset_type, url in [("pdf", asset_urls["pdf"]), ("doc", asset_urls["doc"])]:
-        if not url:
+    for asset_type, asset_url in [("pdf", asset_urls["pdf"]), ("doc", asset_urls["doc"])]:
+        if not asset_url:
             continue
 
         ext = asset_type
@@ -361,17 +326,20 @@ def scrape_lesson(url: str, db: DB, code_gen: ResourceCodeGenerator, session: re
 
         asset_uuid = uuid7()
         asset_code = f"{resource_code}_AS{(len(assets) + 1):02d}"
-        orig_filename = f"{topic_slug}.{ext}"
-        sanitized_name = f"student_{sanitize_filename(topic)}"
-        final_filename = build_file_name("student", folder_name, ext)
+
+        # Build file name: component_type_sanitized_title.ext
+        file_base = build_file_name("student", topic)
+        final_filename = f"{file_base}.{ext}"
         dest_path = download_folder / final_filename
 
-        dl_result = download_asset(url, dest_path)
+        dl_result = download_asset(asset_url, dest_path)
         total_size += dl_result.get("size_bytes", 0)
 
-        # Get MIME type
         mime_map = {"pdf": "application/pdf", "doc": "application/msword"}
         mime = mime_map.get(ext, "application/octet-stream")
+
+        # Original filename from URL
+        orig_filename = f"{topic_slug}.{ext}"
 
         asset_record = {
             "resource_uuid": resource_uuid,
@@ -387,11 +355,11 @@ def scrape_lesson(url: str, db: DB, code_gen: ResourceCodeGenerator, session: re
             "printable": 1,
             "size": f"{dl_result.get('size_bytes', 0)} bytes",
             "source": "local",
-            "title": f"{topic} Discussion – {asset_type.upper()}",
-            "title_local": orig_filename,
+            "title": orig_filename,  # original filename as title
+            "title_local": orig_filename,  # original filename in title_local too
             "type": "document",
-            "url": url,
-            "url_local": url,
+            "url": asset_url,
+            "url_local": asset_url,
             "checksum_original": dl_result.get("checksum"),
             "checksum_final": dl_result.get("checksum"),
             "download_status": dl_result.get("download_status", "failed"),
@@ -420,7 +388,6 @@ def scrape_lesson(url: str, db: DB, code_gen: ResourceCodeGenerator, session: re
         for asset in assets:
             db.insert_asset(asset)
 
-        # Insert resource_validation
         validation_data = {
             "resource_uuid": resource_uuid,
             "source_url": url,
@@ -466,15 +433,12 @@ def main():
     parser = argparse.ArgumentParser(description="esldiscussions.com scraper")
     parser.add_argument("--resume", action="store_true", help="Resume from last scraped")
     parser.add_argument("--limit", type=int, help="Max lessons to scrape")
-    parser.add_argument("--range", type=str, help="Resource code range (e.g. 000001-000010)")
     parser.add_argument("--update", action="store_true", help="Update mode (skip existing)")
     args = parser.parse_args()
 
-    # Init DB
     db = DB(DB_FILE)
     code_gen = ResourceCodeGenerator(SITE_CODE, SERIES_CODE, db.conn)
 
-    # Read urls.txt
     if not os.path.exists(URLS_FILE):
         print(f"ERROR: {URLS_FILE} not found")
         sys.exit(1)
@@ -486,14 +450,14 @@ def main():
     for line in lines:
         parts = line.split()
         if parts:
-            urls.append(parts[0])
+            url = URL_OVERRIDES.get(parts[0], parts[0])
+            urls.append(url)
 
-    print(f"esldiscussions scraper")
+    print(f"esldiscussions scraper v2")
     print(f"  URLs loaded: {len(urls)}")
     print(f"  DB: {DB_FILE}")
     print(f"  Downloads: {DOWNLOAD_DIR}/")
 
-    # Resume: find last scraped URL
     start_idx = 0
     if args.resume:
         cur = db.conn.execute("SELECT source_url FROM resource ORDER BY id DESC LIMIT 1")
@@ -506,7 +470,6 @@ def main():
                     print(f"  Resuming from index {start_idx} ({last_url})")
                     break
 
-    # Update mode: skip existing
     existing_urls = set()
     if args.update:
         cur = db.conn.execute("SELECT source_url FROM resource")
@@ -514,21 +477,6 @@ def main():
             existing_urls.add(row["source_url"])
         print(f"  Existing URLs in DB: {len(existing_urls)}")
 
-    # Range filter
-    if args.range:
-        start_str, end_str = args.range.split("-")
-        range_start = int(start_str)
-        range_end = int(end_str)
-        filtered = []
-        for u in urls:
-            code_gen_temp = ResourceCodeGenerator(SITE_CODE, SERIES_CODE, db.conn)
-            # Try to match by checking if URL is in range
-            topic = extract_topic(u)
-            filtered.append(u)
-        urls = filtered
-        print(f"  Range {args.range}: {len(urls)} URLs")
-
-    # Scrape
     session = requests.Session()
     session.headers.update({"User-Agent": USER_AGENT})
 
@@ -548,7 +496,6 @@ def main():
 
         print(f"\n[{i}/{len(urls)}] ", end="")
 
-        # Retry loop for transient failures
         for attempt in range(1, max_retries + 1):
             result = scrape_lesson(url, db, code_gen, session)
             if result.get("status") == "success":
@@ -563,9 +510,7 @@ def main():
                     print(f"    ✗ FAILED after {max_retries} attempts: {result.get('error', 'unknown')}")
                     failed += 1
 
-        # Random sleep between requests
         sleep_time = random.uniform(0.5, 1.5)
-        # Every 20 lessons, extra 10s sleep
         if i % 20 == 0:
             sleep_time += 10
         print(f"    Sleep {sleep_time:.1f}s")
@@ -578,6 +523,7 @@ def main():
     print(f"  Failed: {failed}")
     print(f"  Skipped: {skipped}")
     print(f"  DB: {DB_FILE}")
+    print(f"  Downloads: {str(DOWNLOAD_DIR)}/")
     print(f"{'='*50}")
 
 
