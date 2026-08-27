@@ -22,16 +22,15 @@ from bs4 import BeautifulSoup
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from config import URL_OVERRIDES
+from sitemap_rules import BASE_URL, EXCLUDE_PATHS
 
-BASE_URL = "https://esldiscussions.com"
-OUTPUT_FILE = "urls.txt"
+# Output lives under data/{series}/urls.txt
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+OUTPUT_FILE = str(REPO_ROOT / "data" / "01" / "urls.txt")
 
-# Static/utility pages to skip
-SKIP_PATHS = {
+# Static/utility pages to skip (from sitemap_rules.EXCLUDE_PATHS plus extras)
+SKIP_PATHS = set(EXCLUDE_PATHS) | {
     "/",
-    "/copyright.html",
-    "/privacy.html",
-    "/links.html",
     "/faqs.html",
     "/book.html",
     "/help.html",

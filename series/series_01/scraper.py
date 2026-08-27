@@ -27,12 +27,19 @@ from urllib.parse import urljoin, urlparse
 import requests
 from bs4 import BeautifulSoup
 
-# ── Global scripts ──────────────────────────────────────────────────────────
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from global_db import DB
-from global_uuidv7 import uuid7
-from global_sanitization import sanitize_filename, sanitize_folder_name
-from global_resource_code_generator import ResourceCodeGenerator
+# ── Paths ───────────────────────────────────────────────────────────────────
+# This scraper lives in series/series_01/. The project root is two levels up.
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+CORE_DIR = REPO_ROOT / "core"
+
+# Make core/ importable (shared global scripts)
+sys.path.insert(0, str(CORE_DIR))
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # local series modules
+
+from database import DB
+from uuid7 import uuid7
+from sanitization import sanitize_filename, sanitize_folder_name
+from resource_code_generator import ResourceCodeGenerator
 from source_registry import SOURCE_REGISTRY
 from config import URL_OVERRIDES
 
@@ -42,10 +49,12 @@ SERIES_CODE = "01"
 SOURCE_NAME = SOURCE_REGISTRY[SITE_CODE]["display_name"]
 BASE_URL = SOURCE_REGISTRY[SITE_CODE]["urls"]["canonical"]
 
-URLS_FILE = "urls.txt"
-DB_FILE = f"{SOURCE_NAME}.db"
-DATA_DIR = Path("data") / SERIES_CODE
+# Data lives under data/{series}/ ; DB under database/
+DATA_DIR = REPO_ROOT / "data" / SERIES_CODE
 DOWNLOAD_DIR = DATA_DIR / "downloads"
+REPORTS_DIR = DATA_DIR / "reports"
+URLS_FILE = DATA_DIR / "urls.txt"
+DB_FILE = str(REPO_ROOT / "database" / f"{SOURCE_NAME}.db")
 TODAY = date.today().isoformat()
 NOW = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
@@ -198,14 +207,22 @@ def build_download_folder_name(topic: str, resource_code: str) -> str:
     return f"{sanitized}_discussion_{resource_code}"
 
 
-def build_file_name(component_type: str, topic: str) -> str:
+def build_file_name(component_type: str, folder_name: str, resource_code: str) -> str:
     """
-    Build file name base: {component_type}_{sanitized_topic}
-    Example: 'student_zambia'
-    The extension is appended separately.
+    Build file name base per Scraping Guidelines:
+        file_name = component_type_{download_folder_name minus resource_code}
+    The file base MUST match the folder's title base (only the resource_code
+    suffix is dropped) so folder and file share one consistent title.
+
+    folder_name = 'zambia_discussion_00002201000688'
+    → base      = 'zambia_discussion'
+    → returns     'student_zambia_discussion'  (extension appended separately)
     """
-    sanitized = sanitize_filename(topic)
-    return f"{component_type}_{sanitized}"
+    base = folder_name
+    suffix = f"_{resource_code}"
+    if base.endswith(suffix):
+        base = base[: -len(suffix)]
+    return f"{component_type}_{base}"
 
 
 def extract_asset_urls(soup: BeautifulSoup, page_url: str) -> dict:
@@ -366,8 +383,8 @@ def scrape_lesson(url: str, db: DB, code_gen: ResourceCodeGenerator, session: re
         asset_uuid = uuid7()
         asset_code = f"{resource_code}_AS{(len(assets) + 1):02d}"
 
-        # File name: component_type_topic_discussion.ext
-        file_base = build_file_name("student", topic)
+        # File name per Guidelines: component_type_{download_folder_name minus resource_code}.ext
+        file_base = build_file_name("student", folder_name, resource_code)
         final_filename = f"{file_base}.{ext}"
         dest_path = download_folder / final_filename
 
@@ -518,6 +535,11 @@ def main():
     parser.add_argument("--limit", type=int, help="Max lessons to scrape")
     parser.add_argument("--update", action="store_true", help="Update mode (skip existing)")
     args = parser.parse_args()
+
+    # Ensure output dirs exist
+    Path(DB_FILE).parent.mkdir(parents=True, exist_ok=True)
+    DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
     db = DB(DB_FILE)
     code_gen = ResourceCodeGenerator(SITE_CODE, SERIES_CODE, db.conn)
