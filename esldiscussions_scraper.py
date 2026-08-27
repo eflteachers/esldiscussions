@@ -93,10 +93,13 @@ CONSTANTS = {
     "is_printable": 1,
     "language": "English",
     "lesson_time": 30,
+    "lesson_topic_a1_locked": 0,
+    "lesson_topic_locked": 0,
     "media_type": "text",
     "material_origin": "pedagogic",
     "purpose": "ge",
     "skill": "speaking",
+    "situation_locked": 0,
     "stage": "group discussion",
     "source_code": SITE_CODE,
     "source_name": SOURCE_NAME,
@@ -197,12 +200,12 @@ def build_download_folder_name(topic: str, resource_code: str) -> str:
 
 def build_file_name(component_type: str, topic: str) -> str:
     """
-    Build file name base: {component_type}_{sanitized_topic}_discussion
-    Example: 'student_zambia_discussion'
+    Build file name base: {component_type}_{sanitized_topic}
+    Example: 'student_zambia'
     The extension is appended separately.
     """
     sanitized = sanitize_filename(topic)
-    return f"{component_type}_{sanitized}_discussion"
+    return f"{component_type}_{sanitized}"
 
 
 def extract_asset_urls(soup: BeautifulSoup, page_url: str) -> dict:
@@ -310,15 +313,18 @@ def scrape_lesson(url: str, db: DB, code_gen: ResourceCodeGenerator, session: re
         "sequence": sequence,
         "source_url": url,
         "title": title,
-        "date": TODAY,
+        "date": TODAY,  # source has no publish date → fallback to today
         "date_1st_scraped": TODAY,
         "download_folder_name": folder_name,
         "body_html": body_html,
         "lesson_topic": extract_lesson_topic(topic),
         "tags": extract_tags(topic),
         "file_extension": None,
+        "count_audio": 0,
         "count_document": 0,
+        "count_presentation": 0,
         "count_total": 0,
+        "count_video": 0,
         "size_doc": None,
         "size_doc_bytes": None,
         "size_files": None,
@@ -368,7 +374,7 @@ def scrape_lesson(url: str, db: DB, code_gen: ResourceCodeGenerator, session: re
             "printable": 1,
             "size": f"{dl_result.get('size_bytes', 0)} bytes",
             "source": "local",
-            "title": orig_filename,
+            "title": sanitize_filename(orig_filename),
             "title_local": orig_filename,
             "type": "document",
             "url": asset_url,
@@ -389,7 +395,9 @@ def scrape_lesson(url: str, db: DB, code_gen: ResourceCodeGenerator, session: re
     doc_count = len(assets)
     resource_data["count_document"] = doc_count
     resource_data["count_total"] = doc_count
-    resource_data["file_extension"] = ", ".join(sorted(extensions))
+    # File extension in mapping order: pdf, doc (not alphabetical)
+    ext_list = [e for e in ("pdf", "doc") if e in extensions]
+    resource_data["file_extension"] = ", ".join(ext_list)
     resource_data["size_doc"] = f"{total_size / 1024:.2f} KB" if total_size else None
     resource_data["size_doc_bytes"] = total_size
     resource_data["size_files"] = resource_data["size_doc"]
