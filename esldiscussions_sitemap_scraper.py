@@ -2,7 +2,7 @@
 """
 esldiscussions_sitemap_scraper.py
 ─────────────────────────────────
-Sitemap scraper for esldiscussions.com.
+Sitemap scraper for esldiscussions.com (source_code=000022).
 
 This site has NO sitemap.xml (returns 403) and NO publish dates on lesson pages.
 Strategy: scrape all lesson URLs from the homepage, use today's date for each.
@@ -13,7 +13,6 @@ Update mode: reads existing urls.txt, skips already-listed URLs, appends new one
 """
 
 import os
-import re
 import sys
 from datetime import date
 from pathlib import Path
@@ -21,15 +20,13 @@ from pathlib import Path
 import requests
 from bs4 import BeautifulSoup
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from config import URL_OVERRIDES
+
 BASE_URL = "https://esldiscussions.com"
 OUTPUT_FILE = "urls.txt"
 
 # Static/utility pages to skip
-URL_OVERRIDES = {
-    "https://esldiscussions.com/r/russia.pdf": "https://esldiscussions.com/r/russia.html",
-}
-
-
 SKIP_PATHS = {
     "/",
     "/copyright.html",
@@ -51,7 +48,6 @@ def get_lesson_links() -> set[str]:
     for a_tag in soup.find_all("a", href=True):
         href = a_tag["href"]
 
-        # Must start with esldiscussions.com
         if href.startswith("https://esldiscussions.com"):
             path = href.replace("https://esldiscussions.com", "")
         elif href.startswith("http://esldiscussions.com"):
@@ -61,14 +57,14 @@ def get_lesson_links() -> set[str]:
         else:
             continue
 
-        # Skip utility pages
         if path in SKIP_PATHS:
             continue
-        # Must be .html
         if not path.endswith(".html"):
             continue
 
         full_url = f"https://esldiscussions.com{path}"
+        # Apply URL overrides (e.g. russia.pdf → russia.html)
+        full_url = URL_OVERRIDES.get(full_url, full_url)
         links.add(full_url)
 
     return links
@@ -108,14 +104,12 @@ def main():
         print("  nothing new — exiting")
         return
 
-    # Append new links at the end
     with open(OUTPUT_FILE, "a", encoding="utf-8") as f:
         for url in sorted(new_links):
             f.write(f"{url} {today}\n")
 
     print(f"  appended {len(new_links)} URLs to {OUTPUT_FILE}")
 
-    # Summary
     with open(OUTPUT_FILE) as f:
         total = sum(1 for _ in f)
     print(f"  total lines in {OUTPUT_FILE}: {total}")

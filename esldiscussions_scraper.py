@@ -2,7 +2,7 @@
 """
 esldiscussions_scraper.py
 ─────────────────────────
-Main scraper for esldiscussions.com (v2 — Aug 2026 schema).
+Main scraper for esldiscussions.com (source_code=000022).
 
 Scrapes lesson pages from urls.txt (oldest first), extracts metadata,
 downloads PDF + Word assets, and populates the SQLite database.
@@ -17,7 +17,6 @@ Usage:
 import argparse
 import hashlib
 import os
-import re
 import sys
 import time
 import random
@@ -34,12 +33,15 @@ from global_db import DB
 from global_uuidv7 import uuid7
 from global_sanitization import sanitize_filename, sanitize_folder_name
 from global_resource_code_generator import ResourceCodeGenerator
+from source_registry import SOURCE_REGISTRY
+from config import URL_OVERRIDES
 
-# ── Constants ────────────────────────────────────────────────────────────────
-SITE_CODE = "000021"
+# ── Source identity (from SOURCE_REGISTRY) ──────────────────────────────────
+SITE_CODE = "000022"
 SERIES_CODE = "01"
-SOURCE_NAME = "esldiscussions"
-BASE_URL = "https://esldiscussions.com"
+SOURCE_NAME = SOURCE_REGISTRY[SITE_CODE]["display_name"]
+BASE_URL = SOURCE_REGISTRY[SITE_CODE]["urls"]["canonical"]
+
 URLS_FILE = "urls.txt"
 DB_FILE = f"{SOURCE_NAME}.db"
 DATA_DIR = Path("data") / SERIES_CODE
@@ -47,12 +49,6 @@ DOWNLOAD_DIR = DATA_DIR / "downloads"
 TODAY = date.today().isoformat()
 NOW = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-
-# URL override map for special cases (hardcoded fixes)
-URL_OVERRIDES = {
-    # russia page links to PDF instead of HTML
-    "https://esldiscussions.com/r/russia.pdf": "https://esldiscussions.com/r/russia.html",
-}
 
 
 # ── Constant field values (from mapping sheet) ───────────────────────────────
@@ -116,7 +112,6 @@ def extract_topic(source_url: str) -> str:
     """Extract topic name from URL like /z/zambia.html → 'Zambia'."""
     path = urlparse(source_url).path
     name = path.rstrip(".html").rsplit("/", 1)[-1]
-    # Normalize: replace hyphens/underscores with spaces, title case
     name = name.replace("-", " ").replace("_", " ").title()
     return name
 
@@ -127,9 +122,8 @@ def extract_title(soup: BeautifulSoup, topic: str) -> str:
 
 
 def extract_lesson_topic(topic: str) -> str:
-    """Generate lesson_topic value based on the topic."""
-    # Generic topics common to all discussion lessons
-    return f"{topic}, countries and cultures, geography, history, travel and tourism, discussion questions"
+    """lesson_topic = just the topic name (per mapping: 'Zambia')."""
+    return topic
 
 
 def extract_tags(topic: str) -> str:
@@ -138,11 +132,16 @@ def extract_tags(topic: str) -> str:
 
 
 def extract_body_html(soup: BeautifulSoup) -> str:
-    """Extract the discussion questions as restricted HTML (a, p, strong, li, i, ul, ol, h1, h2, h3)."""
+    """
+    Extract discussion questions as restricted HTML.
+    Only these tags allowed: a, p, strong, li, i, ul, ol, h1, h2, h3.
+    Table tags (table, tr, td, etc.) are STRIPPED — only their text content remains.
+    """
     body = soup.find("body")
     if not body:
         return ""
 
+    # Find the <article> tag containing the discussion
     article = body.find("article")
     if not article:
         for el in body.find_all(["h3", "h2", "strong"]):
@@ -161,37 +160,49 @@ def extract_body_html(soup: BeautifulSoup) -> str:
 
     soup_article = BeautifulSoup(raw_html, "lxml")
 
+    # Remove unwanted elements entirely
     for tag in soup_article.find_all(["script", "iframe", "style", "img", "br"]):
         tag.decompose()
+
+    # Convert em → i
     for em in soup_article.find_all("em"):
         em.name = "i"
+
+    # Clean links
     for a in soup_article.find_all("a"):
         href = a.get("href", "") or ""
         a.attrs = {"href": href}
         a["target"] = "_blank"
         a["rel"] = "nofollow noopener noreferrer"
 
-    allowed = {"a", "p", "strong", "li", "i", "ul", "ol", "h1", "h2", "h3",
-               "table", "tr", "td", "th", "thead", "tbody", "article"}
+    # ALLOWED tags only — everything else is unwrapped (text kept, tags removed)
+    allowed = {"a", "p", "strong", "li", "i", "ul", "ol", "h1", "h2", "h3"}
     for tag in soup_article.find_all(True):
         if tag.name not in allowed:
             tag.unwrap()
 
-    # Ensure return value is always a str, not bytes
+    # Ensure str return
     result = str(soup_article)
     return result if isinstance(result, str) else result.decode("utf-8", errors="replace")
 
 
-def build_download_folder_name(title: str, resource_code: str) -> str:
-    """Build folder name: sanitized_full_title_resource_code"""
-    sanitized = sanitize_folder_name(title)
-    return f"{sanitized}_{resource_code}"
+def build_download_folder_name(topic: str, resource_code: str) -> str:
+    """
+    Build folder name per mapping: {sanitized_topic}_discussion_{resource_code}
+    Example: 'zambia_discussion_00002201000001'
+    """
+    sanitized = sanitize_folder_name(topic)
+    return f"{sanitized}_discussion_{resource_code}"
 
 
-def build_file_name(component_type: str, title: str) -> str:
-    """Build file name: component_type_sanitized_title.extension"""
-    sanitized = sanitize_filename(title)
-    return f"{component_type}_{sanitized}"
+def build_file_name(component_type: str, topic: str) -> str:
+    """
+    Build file name base: {component_type}_{sanitized_topic}_discussion
+    Example: 'student_zambia_discussion'
+    The extension is appended separately.
+    """
+    sanitized = sanitize_filename(topic)
+    return f"{component_type}_{sanitized}_discussion"
 
 
 def extract_asset_urls(soup: BeautifulSoup, page_url: str) -> dict:
@@ -201,7 +212,7 @@ def extract_asset_urls(soup: BeautifulSoup, page_url: str) -> dict:
         href = a_tag["href"]
         text = a_tag.get_text(strip=True).lower()
         full_url = urljoin(page_url, href)
-        # Apply URL overrides
+        # Apply URL overrides from config.py
         full_url = URL_OVERRIDES.get(full_url, full_url)
         if full_url.endswith(".pdf"):
             assets["pdf"] = full_url
@@ -279,14 +290,14 @@ def scrape_lesson(url: str, db: DB, code_gen: ResourceCodeGenerator, session: re
     resource_code = code_gen.get_next_resource_code()
     sequence = resource_code[-6:]
 
-    # Build folder name
-    folder_name = build_download_folder_name(title, resource_code)
+    # Build folder and file names
+    folder_name = build_download_folder_name(topic, resource_code)
     download_folder = DOWNLOAD_DIR / folder_name
 
     # Asset URLs
     asset_urls = extract_asset_urls(soup, url)
 
-    # Body HTML
+    # Body HTML (restricted tags only)
     body_html = extract_body_html(soup)
 
     # Build resource data
@@ -330,7 +341,7 @@ def scrape_lesson(url: str, db: DB, code_gen: ResourceCodeGenerator, session: re
         asset_uuid = uuid7()
         asset_code = f"{resource_code}_AS{(len(assets) + 1):02d}"
 
-        # Build file name: component_type_sanitized_title.ext
+        # File name: component_type_topic_discussion.ext
         file_base = build_file_name("student", topic)
         final_filename = f"{file_base}.{ext}"
         dest_path = download_folder / final_filename
@@ -341,7 +352,6 @@ def scrape_lesson(url: str, db: DB, code_gen: ResourceCodeGenerator, session: re
         mime_map = {"pdf": "application/pdf", "doc": "application/msword"}
         mime = mime_map.get(ext, "application/octet-stream")
 
-        # Original filename from URL
         orig_filename = f"{topic_slug}.{ext}"
 
         asset_record = {
@@ -358,8 +368,8 @@ def scrape_lesson(url: str, db: DB, code_gen: ResourceCodeGenerator, session: re
             "printable": 1,
             "size": f"{dl_result.get('size_bytes', 0)} bytes",
             "source": "local",
-            "title": orig_filename,  # original filename as title
-            "title_local": orig_filename,  # original filename in title_local too
+            "title": orig_filename,
+            "title_local": orig_filename,
             "type": "document",
             "url": asset_url,
             "url_local": asset_url,
@@ -456,7 +466,7 @@ def main():
             url = URL_OVERRIDES.get(parts[0], parts[0])
             urls.append(url)
 
-    print(f"esldiscussions scraper v2")
+    print(f"esldiscussions scraper (source_code={SITE_CODE})")
     print(f"  URLs loaded: {len(urls)}")
     print(f"  DB: {DB_FILE}")
     print(f"  Downloads: {DOWNLOAD_DIR}/")
