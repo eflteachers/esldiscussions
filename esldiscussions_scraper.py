@@ -209,23 +209,33 @@ def build_file_name(component_type: str, topic: str) -> str:
 
 
 def extract_asset_urls(soup: BeautifulSoup, page_url: str) -> dict:
-    """Find PDF and DOC download URLs from the page."""
+    """
+    Find PDF and DOC download URLs from the page.
+
+    NOTE: URL_OVERRIDES applies to LESSON PAGE urls (urls.txt), never to asset
+    URLs. Applying it here would rewrite russia.pdf → russia.html and destroy a
+    perfectly valid PDF asset.
+    """
     assets = {"pdf": None, "doc": None}
     for a_tag in soup.find_all("a", href=True):
         href = a_tag["href"]
         text = a_tag.get_text(strip=True).lower()
         full_url = urljoin(page_url, href)
-        # Apply URL overrides from config.py
-        full_url = URL_OVERRIDES.get(full_url, full_url)
-        if full_url.endswith(".pdf"):
+        if full_url.lower().endswith(".pdf"):
             assets["pdf"] = full_url
-        elif full_url.endswith(".doc") and "pdf" not in text:
+        elif full_url.lower().endswith(".doc") and "pdf" not in text:
             assets["doc"] = full_url
     return assets
 
 
 def download_asset(url: str, dest_path: Path) -> dict:
-    """Download a single asset file to .part, validate, rename."""
+    """
+    Download a single asset file to .part, validate, rename.
+
+    Some esldiscussions asset links use a capitalised filename (e.g. June.pdf)
+    while the file on the server is lowercase (june.pdf); the CDN answers 403 for
+    the wrong case. On 403/404 we retry once with a lowercased filename.
+    """
     result = {
         "download_status": "failed",
         "http_status": None,
@@ -237,37 +247,46 @@ def download_asset(url: str, dest_path: Path) -> dict:
         result["download_status"] = "not_downloadable"
         return result
 
+    # Build candidate URLs: as-linked, then lowercase-filename fallback
+    candidates = [url]
+    parts = url.rsplit("/", 1)
+    if len(parts) == 2 and parts[1] != parts[1].lower():
+        candidates.append(f"{parts[0]}/{parts[1].lower()}")
+
     temp_path = dest_path.with_suffix(dest_path.suffix + ".part")
-    try:
-        resp = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=60, stream=True)
-        result["http_status"] = resp.status_code
-        if resp.status_code != 200:
-            result["download_status"] = "failed"
+    for candidate in candidates:
+        try:
+            resp = requests.get(candidate, headers={"User-Agent": USER_AGENT}, timeout=60, stream=True)
+            result["http_status"] = resp.status_code
+            if resp.status_code != 200:
+                result["download_status"] = "failed"
+                continue
+
+            temp_path.parent.mkdir(parents=True, exist_ok=True)
+            sha256 = hashlib.sha256()
+            with open(temp_path, "wb") as f:
+                for chunk in resp.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+                        sha256.update(chunk)
+
+            size = temp_path.stat().st_size
+            result["size_bytes"] = size
+            if size == 0:
+                temp_path.unlink(missing_ok=True)
+                result["download_status"] = "failed"
+                continue
+
+            temp_path.rename(dest_path)
+            result["checksum"] = sha256.hexdigest()
+            result["file_exists"] = 1
+            result["download_status"] = "success"
+            result["final_url"] = candidate
             return result
-
-        temp_path.parent.mkdir(parents=True, exist_ok=True)
-        sha256 = hashlib.sha256()
-        with open(temp_path, "wb") as f:
-            for chunk in resp.iter_content(chunk_size=8192):
-                if chunk:
-                    f.write(chunk)
-                    sha256.update(chunk)
-
-        size = temp_path.stat().st_size
-        result["size_bytes"] = size
-        if size == 0:
+        except Exception as e:
             temp_path.unlink(missing_ok=True)
             result["download_status"] = "failed"
-            return result
-
-        temp_path.rename(dest_path)
-        result["checksum"] = sha256.hexdigest()
-        result["file_exists"] = 1
-        result["download_status"] = "success"
-    except Exception as e:
-        temp_path.unlink(missing_ok=True)
-        result["download_status"] = "failed"
-        result["validation_notes"] = str(e)
+            result["validation_notes"] = str(e)
     return result
 
 
@@ -378,7 +397,7 @@ def scrape_lesson(url: str, db: DB, code_gen: ResourceCodeGenerator, session: re
             "title_local": orig_filename,
             "type": "document",
             "url": asset_url,
-            "url_local": asset_url,
+            "url_local": dl_result.get("final_url", asset_url),
             "checksum_original": dl_result.get("checksum"),
             "checksum_final": dl_result.get("checksum"),
             "download_status": dl_result.get("download_status", "failed"),
@@ -391,17 +410,60 @@ def scrape_lesson(url: str, db: DB, code_gen: ResourceCodeGenerator, session: re
         }
         assets.append(asset_record)
 
-    # Update resource counts
-    doc_count = len(assets)
-    resource_data["count_document"] = doc_count
-    resource_data["count_total"] = doc_count
-    # File extension in mapping order: pdf, doc (not alphabetical)
-    ext_list = [e for e in ("pdf", "doc") if e in extensions]
-    resource_data["file_extension"] = ", ".join(ext_list)
+    # ── Counters ─────────────────────────────────────────────────────────────
+    # Per RF guidelines the four counters mean different things:
+    #   expected   = what a generic detector thinks the page offers
+    #   scraped    = rows actually inserted into the child table
+    #   downloaded = files really downloaded and healthy
+    #   count      = rows that are valid + usable for the RF user
+    doc_expected = len([u for u in (asset_urls["pdf"], asset_urls["doc"]) if u])
+    doc_scraped = len(assets)
+    doc_downloaded = len([a for a in assets if a["download_status"] == "success"])
+    doc_valid = len([a for a in assets if a["validation_status"] == "valid"])
+
+    resource_data["count_document"] = doc_valid
+    resource_data["count_total"] = doc_valid
+    # File extension in mapping order: pdf, doc (not alphabetical); only valid files
+    valid_exts = {a["extension"] for a in assets if a["validation_status"] == "valid"}
+    resource_data["file_extension"] = ", ".join(e for e in ("pdf", "doc") if e in valid_exts)
     resource_data["size_doc"] = f"{total_size / 1024:.2f} KB" if total_size else None
     resource_data["size_doc_bytes"] = total_size
     resource_data["size_files"] = resource_data["size_doc"]
     resource_data["size_files_bytes"] = total_size
+
+    # Overall statuses derived from the child rows, never hardcoded
+    if doc_scraped == 0:
+        download_status = "not_downloadable"
+    elif doc_downloaded == doc_scraped:
+        download_status = "success"
+    elif doc_downloaded == 0:
+        download_status = "failed"
+    else:
+        download_status = "partial"
+
+    if doc_valid == doc_scraped:
+        validation_status = "passed"
+    elif doc_valid == 0 and doc_scraped > 0:
+        validation_status = "failed"
+    else:
+        validation_status = "partial"
+
+    needs_review = 0 if validation_status == "passed" else 1
+    resource_data["validation_status"] = validation_status
+    resource_data["needs_review"] = needs_review
+
+    if validation_status == "passed":
+        validation_notes = (
+            f"Page returned HTTP {http_status}; all {doc_valid} document(s) downloaded and validated."
+        )
+    else:
+        failed_titles = ", ".join(
+            a["title"] for a in assets if a["validation_status"] != "valid"
+        )
+        validation_notes = (
+            f"Page returned HTTP {http_status}; "
+            f"{doc_downloaded}/{doc_scraped} document(s) downloaded. Failed: {failed_titles}."
+        )
 
     # Insert into DB
     try:
@@ -412,31 +474,31 @@ def scrape_lesson(url: str, db: DB, code_gen: ResourceCodeGenerator, session: re
         validation_data = {
             "resource_uuid": resource_uuid,
             "source_url": url,
-            "final_url": url,
-            "download_status": "success" if all(a["download_status"] == "success" for a in assets) else "partial",
+            "final_url": resp.url or url,
+            "download_status": download_status,
             "http_status": http_status,
-            "needs_review": 0,
-            "scrape_error": "none",
+            "needs_review": needs_review,
+            "scrape_error": "none" if validation_status == "passed" else "download_link_not_found",
             "scrape_status": "success",
-            "validation_status": "passed",
+            "validation_status": validation_status,
             "validated_at": NOW,
-            "validation_notes": "Page, PDF, and Word file returned HTTP 200; both downloadable documents were validated.",
+            "validation_notes": validation_notes,
             "count_audio_expected": 0,
             "count_audio_scraped": 0,
             "count_audio_downloaded": 0,
             "count_audio": 0,
-            "count_document_expected": doc_count,
-            "count_document_scraped": doc_count,
-            "count_document_downloaded": doc_count,
-            "count_document": doc_count,
+            "count_document_expected": doc_expected,
+            "count_document_scraped": doc_scraped,
+            "count_document_downloaded": doc_downloaded,
+            "count_document": doc_valid,
             "count_presentation_expected": 0,
             "count_presentation_scraped": 0,
             "count_presentation_downloaded": 0,
             "count_presentation": 0,
-            "count_total_expected": doc_count,
-            "count_total_scraped": doc_count,
-            "count_total_downloaded": doc_count,
-            "count_total": doc_count,
+            "count_total_expected": doc_expected,
+            "count_total_scraped": doc_scraped,
+            "count_total_downloaded": doc_downloaded,
+            "count_total": doc_valid,
             "count_video_expected": 0,
             "count_video_scraped": 0,
             "count_video_downloaded": 0,
