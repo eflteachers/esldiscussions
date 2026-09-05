@@ -1,117 +1,142 @@
 #!/usr/bin/env python3
 """
-esldiscussions_sitemap_scraper.py
-─────────────────────────────────
-Sitemap scraper for esldiscussions.com (source_code=000022).
+sitemap_scraper.py
+──────────────────
+Link scraper for esldiscussions.com (source_code=000022, series 01).
 
-This site has NO sitemap.xml (returns 403) and NO publish dates on lesson pages.
-Strategy: scrape all lesson URLs from the homepage, use today's date for each.
+Discovery strategy (per RF guidelines: sitemap first, then fallback), verified
+against the live site:
 
-Output: urls.txt — one URL per line with date (URL YYYY-MM-DD), sorted alphabetically.
+  1. Fetch the GZIPPED sitemap at /sitemap.xml.gz (the plain /sitemap.xml is
+     403 on this host). Extract every lesson <loc>.
+  2. Also scan the homepage for lesson links, because the sitemap is stale
+     (all <lastmod> = 2016-02-16) and misses ~24 lessons added after 2016.
+  3. UNION both sources, filter to real lesson pages, drop utility pages.
 
-Update mode: reads existing urls.txt, skips already-listed URLs, appends new ones.
+The sitemap's <lastmod> is the file's generation date (identical for every
+entry), so it is NOT used. Since lesson pages carry no publish date either,
+every URL is written with today's date.
+
+Output: data/01/urls.txt — one "<url> <YYYY-MM-DD>" per line, sorted, oldest
+line first (here the order is alphabetical since no real dates exist).
+
+Update mode (default): reads existing urls.txt, skips already-listed URLs,
+appends only new ones to the END of the file so resource_code sequence is
+never disturbed.
+
+Invoke through the terminal tool:
+    python3 series/series_01/sitemap_scraper.py
 """
 
+import gzip
 import os
 import sys
 from datetime import date
 from pathlib import Path
+from urllib.parse import urljoin
 
 import requests
 from bs4 import BeautifulSoup
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from config import URL_OVERRIDES
-from sitemap_rules import BASE_URL, EXCLUDE_PATHS
+from sitemap_rules import (
+    BASE_URL,
+    SITEMAP_GZ_URL,
+    normalise_url,
+    is_lesson_url,
+)
 
-# Output lives under data/{series}/urls.txt
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 OUTPUT_FILE = str(REPO_ROOT / "data" / "01" / "urls.txt")
 
-# Static/utility pages to skip (from sitemap_rules.EXCLUDE_PATHS plus extras)
-SKIP_PATHS = set(EXCLUDE_PATHS) | {
-    "/",
-    "/faqs.html",
-    "/book.html",
-    "/help.html",
-}
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+)
+HEADERS = {"User-Agent": USER_AGENT}
 
 
-def get_lesson_links() -> set[str]:
-    """Scrape homepage and return all lesson URLs."""
-    resp = requests.get(BASE_URL, timeout=30)
+def from_sitemap() -> set[str]:
+    """Return lesson URLs from the gzipped sitemap (empty set on failure)."""
+    try:
+        resp = requests.get(SITEMAP_GZ_URL, headers=HEADERS, timeout=30)
+        if resp.status_code != 200:
+            print(f"  sitemap.xml.gz → HTTP {resp.status_code}, skipping")
+            return set()
+        xml = gzip.decompress(resp.content).decode("utf-8", errors="replace")
+    except Exception as e:
+        print(f"  sitemap.xml.gz → error: {e}, skipping")
+        return set()
+
+    soup = BeautifulSoup(xml, "xml")
+    urls = set()
+    for loc in soup.find_all("loc"):
+        u = normalise_url(loc.get_text())
+        u = URL_OVERRIDES.get(u, u)
+        if is_lesson_url(u):
+            urls.add(u)
+    print(f"  sitemap.xml.gz → {len(urls)} lesson URLs")
+    return urls
+
+
+def from_homepage() -> set[str]:
+    """Return lesson URLs discovered on the homepage."""
+    resp = requests.get(BASE_URL, headers=HEADERS, timeout=30)
     resp.raise_for_status()
     soup = BeautifulSoup(resp.text, "lxml")
 
-    links = set()
-    for a_tag in soup.find_all("a", href=True):
-        href = a_tag["href"]
-
-        if href.startswith("https://esldiscussions.com"):
-            path = href.replace("https://esldiscussions.com", "")
-        elif href.startswith("http://esldiscussions.com"):
-            path = href.replace("http://esldiscussions.com", "")
-        elif href.startswith("/"):
-            path = href
-        else:
-            continue
-
-        if path in SKIP_PATHS:
-            continue
-        if not path.endswith(".html"):
-            continue
-
-        full_url = f"https://esldiscussions.com{path}"
-        # Apply URL overrides (e.g. russia.pdf → russia.html)
-        full_url = URL_OVERRIDES.get(full_url, full_url)
-        links.add(full_url)
-
-    return links
+    urls = set()
+    for a in soup.find_all("a", href=True):
+        u = urljoin(BASE_URL + "/", a["href"])
+        u = normalise_url(u)
+        u = URL_OVERRIDES.get(u, u)
+        if is_lesson_url(u):
+            urls.add(u)
+    print(f"  homepage       → {len(urls)} lesson URLs")
+    return urls
 
 
-def load_existing_urls(path: str) -> set[str]:
-    """Load URLs already in urls.txt."""
+def load_existing(path: str) -> list[str]:
+    """Return existing URLs in file order (to preserve sequence)."""
     if not os.path.exists(path):
-        return set()
-    existing = set()
+        return []
+    out = []
     with open(path, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if line:
-                url = line.split()[0]
-                existing.add(url)
-    return existing
+                out.append(line.split()[0])
+    return out
 
 
 def main():
     today = date.today().isoformat()
+    print("[esldiscussions sitemap scraper]")
 
-    print(f"[esldiscussions sitemap scraper]")
-    print(f"  scraping {BASE_URL} ...")
+    # 1 + 2: union of sitemap and homepage
+    discovered = from_sitemap() | from_homepage()
+    print(f"  union          → {len(discovered)} unique lesson URLs")
 
-    all_links = get_lesson_links()
-    print(f"  found {len(all_links)} URLs on homepage")
+    existing = load_existing(OUTPUT_FILE)
+    existing_set = set(existing)
+    new_urls = sorted(discovered - existing_set)
 
-    existing = load_existing_urls(OUTPUT_FILE)
-    new_links = all_links - existing
-    old_links = all_links & existing
+    print(f"  already listed : {len(existing)}")
+    print(f"  new to append  : {len(new_urls)}")
 
-    print(f"  {len(old_links)} already in {OUTPUT_FILE}")
-    print(f"  {len(new_links)} new URLs to append")
-
-    if not new_links:
+    if not new_urls:
         print("  nothing new — exiting")
         return
 
+    Path(OUTPUT_FILE).parent.mkdir(parents=True, exist_ok=True)
+    # Append new URLs to the END so existing resource_code sequence is preserved.
     with open(OUTPUT_FILE, "a", encoding="utf-8") as f:
-        for url in sorted(new_links):
-            f.write(f"{url} {today}\n")
+        for u in new_urls:
+            f.write(f"{u} {today}\n")
 
-    print(f"  appended {len(new_links)} URLs to {OUTPUT_FILE}")
-
-    with open(OUTPUT_FILE) as f:
-        total = sum(1 for _ in f)
-    print(f"  total lines in {OUTPUT_FILE}: {total}")
+    total = len(existing) + len(new_urls)
+    print(f"  appended {len(new_urls)} URLs; total now {total}")
 
 
 if __name__ == "__main__":
