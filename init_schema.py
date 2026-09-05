@@ -18,8 +18,8 @@ REPO_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(REPO_ROOT / "core"))
 sys.path.insert(0, str(REPO_ROOT / "series" / "series_01"))
 
-from database import DB
-from source_registry import SOURCE_REGISTRY
+from global_database import DB
+from global_source_registry import SOURCE_REGISTRY
 
 SITE_CODE = "000022"
 SOURCE_NAME = SOURCE_REGISTRY[SITE_CODE]["display_name"]

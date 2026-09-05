@@ -13,7 +13,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "core"))
 
-from resource_code_generator import ResourceCodeGenerator
+from global_resource_code_generator import ResourceCodeGenerator
 
 
 def _mem_db():
