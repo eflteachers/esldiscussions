@@ -71,16 +71,16 @@ CONSTANTS = {
     "resource_form_local": "discussion handout",
     "lesson_type": "activity",
     "lesson_type_local": "discussion",
-    "server": "free",
+    "server": "premium",
     "status": "active",
     "activity_type": "discussion",
     "activity_type_local": "discussion",
     "age_group": "Teens, Adults",
-    "audience": "Learners, Teachers",
+    "audience": "teachers",
     "author_local": "Sean Banville",
     "content_type_local": "Discussion",
     "domain": "ESL",
-    "english_variety": "British",
+    "english_variety": "british",
     "focus": "speaking",
     "function": None,
     "function_locked": 0,
@@ -109,7 +109,7 @@ CONSTANTS = {
     "purpose": "ge",
     "skill": "speaking",
     "situation_locked": 0,
-    "stage": "group discussion",
+    "stage": None,
     "source_code": SITE_CODE,
     "source_name": SOURCE_NAME,
     "source_series_code": SERIES_CODE,
@@ -353,8 +353,9 @@ def scrape_lesson(url: str, db: DB, code_gen: ResourceCodeGenerator, session: re
         "date_1st_scraped": TODAY,
         "download_folder_name": folder_name,
         "body_html": body_html,
-        "lesson_topic": extract_lesson_topic(topic),
-        "tags": extract_tags(topic),
+        "lesson_topic": None,
+        "lesson_topic_local": extract_lesson_topic(topic),
+        "tags": None,
         "file_extension": None,
         "count_audio": 0,
         "count_document": 0,
@@ -439,7 +440,7 @@ def scrape_lesson(url: str, db: DB, code_gen: ResourceCodeGenerator, session: re
     doc_valid = len([a for a in assets if a["validation_status"] == "valid"])
 
     resource_data["count_document"] = doc_valid
-    resource_data["count_total"] = doc_valid
+    resource_data["count_total"] = 1
     # File extension in mapping order: pdf, doc (not alphabetical); only valid files
     valid_exts = {a["extension"] for a in assets if a["validation_status"] == "valid"}
     resource_data["file_extension"] = ", ".join(e for e in ("pdf", "doc") if e in valid_exts)
