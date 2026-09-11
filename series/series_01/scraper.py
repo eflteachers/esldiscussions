@@ -38,7 +38,7 @@ CORE_DIR = REPO_ROOT / "core"
 sys.path.insert(0, str(CORE_DIR))
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # local series modules
 
-from global_database import DB
+from global_db import DB
 from global_uuid7 import uuid7
 from global_sanitization import sanitize_filename, sanitize_folder_name
 from global_resource_code_generator import ResourceCodeGenerator
