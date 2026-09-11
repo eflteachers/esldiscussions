@@ -1,5 +1,6 @@
 {
   "python.analysis.extraPaths": [
-    "${workspaceFolder}/core"
+    "${workspaceFolder}/core",
+    "${workspaceFolder}/series/series_01"
   ]
 }

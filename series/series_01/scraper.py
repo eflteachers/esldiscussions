@@ -12,11 +12,13 @@ Usage:
     python3 esldiscussions_scraper.py --resume           # Resume from last
     python3 esldiscussions_scraper.py --limit 5          # First 5 only
     python3 esldiscussions_scraper.py --update           # Update mode (skip existing)
+    python3 esldiscussions_scraper.py --refresh-body     # Re-fetch body_html in place
 """
 
 import argparse
 import hashlib
 import os
+import re
 import sys
 import time
 import random
@@ -25,7 +27,7 @@ from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
 import requests
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, NavigableString
 
 # ── Paths ───────────────────────────────────────────────────────────────────
 # This scraper lives in series/series_01/. The project root is two levels up.
@@ -143,59 +145,163 @@ def extract_tags(topic: str) -> str:
     return f"{topic}, culture, geography, history, travel, tourism, discussion questions"
 
 
+def find_article(body):
+    """Locate the <article> holding the discussion, with a legacy fallback."""
+    article = body.find("article")
+    if article:
+        return article
+    for el in body.find_all(["h3", "h2", "strong"]):
+        if "THE DISCUSSION ON" in el.get_text(strip=True).upper():
+            parent = el.find_parent(["div", "td", "section"])
+            if parent:
+                return parent
+    return None
+
+
+def normalise_whitespace(html: str) -> str:
+    """Collapse runs of whitespace in a serialized HTML fragment."""
+    return re.sub(r"\s+", " ", html.replace("\xa0", " ")).strip()
+
+
+def text_after(node, child) -> str:
+    """Plain text of `node` that follows `child`."""
+    parts = []
+    for sibling in child.next_siblings:
+        parts.append(sibling.get_text() if hasattr(sibling, "get_text") else str(sibling))
+    return "".join(parts)
+
+
 def extract_body_html(soup: BeautifulSoup) -> str:
     """
-    Extract discussion questions as restricted HTML.
-    Only these tags allowed: a, p, strong, li, i, ul, ol, h1, h2, h3.
-    Table tags (table, tr, td, etc.) are STRIPPED — only their text content remains.
+    Extract the discussion as restricted HTML, preserving document structure.
+
+    Source markup (identical on every lesson page) is:
+
+        <p><strong>STUDENT A's QUESTIONS</strong> (Do not show these to Student B.)</p>
+        <table>... one <tr> per question, number cell + question cell ...</table>
+        <p><strong>STUDENT B's QUESTIONS</strong> ...</p>
+        <table>...</table>
+
+    It is converted to the RF structure (see body_html.txt):
+
+        <h3>STUDENT A's QUESTIONS</h3>
+        <p><strong>Do not show these to Student B.</strong></p>
+        <ol>
+        <li>question</li>
+        ...
+        </ol>
+
+    * section heading  -> <h3>, its parenthetical note -> own <p><strong>
+    * question table   -> <ol>/<li>; the (n) number cell is dropped
+    * inline tags (<em>, <strong>, real <a>) are preserved; <em> -> <i>
+    * only a, p, strong, li, i, ul, ol, h1, h2, h3 are emitted
     """
     body = soup.find("body")
     if not body:
         return ""
 
-    # Find the <article> tag containing the discussion
-    article = body.find("article")
-    if not article:
-        for el in body.find_all(["h3", "h2", "strong"]):
-            if "THE DISCUSSION ON" in el.get_text(strip=True).upper():
-                parent = el.find_parent(["div", "td", "section"])
-                if parent:
-                    article = parent
-                    break
-
+    article = find_article(body)
     if not article:
         return ""
 
-    raw_html = str(article)
-    if not raw_html.strip():
+    work = BeautifulSoup(str(article), "lxml").find("article")
+    if work is None:
         return ""
 
-    soup_article = BeautifulSoup(raw_html, "lxml")
+    # <br> separates inline content — replace with a space rather than dropping it
+    for br in work.find_all("br"):
+        br.replace_with(" ")
 
-    # Remove unwanted elements entirely
-    for tag in soup_article.find_all(["script", "iframe", "style", "img", "br"]):
+    # Remove non-content elements entirely
+    for tag in work.find_all(["script", "iframe", "style", "img"]):
         tag.decompose()
 
-    # Convert em → i
-    for em in soup_article.find_all("em"):
+    # <em> becomes <i> (allowed)
+    for em in work.find_all("em"):
         em.name = "i"
+        em.attrs = {}
 
-    # Clean links
-    for a in soup_article.find_all("a"):
-        href = a.get("href", "") or ""
-        a.attrs = {"href": href}
-        a["target"] = "_blank"
-        a["rel"] = "nofollow noopener noreferrer"
+    # Keep real links; drop dead MS-Word bookmarks (anchors with no href)
+    for a in work.find_all("a"):
+        href = a.get("href")
+        if href:
+            a.attrs = {
+                "href": href,
+                "target": "_blank",
+                "rel": "nofollow noopener noreferrer",
+            }
+        else:
+            a.unwrap()
 
-    # ALLOWED tags only — everything else is unwrapped (text kept, tags removed)
+    # Section header: <p><strong>TITLE</strong> (note)</p>
+    #              -> <h3>TITLE</h3> + <p><strong>note</strong></p>
+    for p in list(work.find_all("p")):
+        strong = p.find("strong")
+        if strong is None:
+            continue
+        title = strong.get_text(" ", strip=True)
+        if "QUESTIONS" not in title.upper():
+            continue
+        note = normalise_whitespace(text_after(p, strong)).strip("()").strip()
+        heading = work.new_tag("h3")
+        heading.string = title
+        if note:
+            note_p = work.new_tag("p")
+            note_strong = work.new_tag("strong")
+            note_strong.string = note
+            note_p.append(note_strong)
+            p.replace_with(heading, note_p)
+        else:
+            p.replace_with(heading)
+
+    # Question tables: one <tr> per question -> <ol><li>...</li></ol>
+    for table in list(work.find_all("table")):
+        ordered = work.new_tag("ol")
+        for tr in table.find_all("tr"):
+            cells = tr.find_all("td")
+            if not cells:
+                continue
+            question_cell = cells[-1]
+            # Unwrap inner <p> wrappers; the <li> takes their place
+            for inner_p in question_cell.find_all("p"):
+                inner_p.insert_after(NavigableString(" "))
+                inner_p.unwrap()
+            li = work.new_tag("li")
+            for content in list(question_cell.contents):
+                li.append(content.extract())
+            ordered.append(li)
+        table.replace_with(ordered)
+
+    # Drop empty paragraphs left behind by the source markup
+    for p in work.find_all("p"):
+        if not p.get_text(strip=True) and not p.find("a"):
+            p.decompose()
+
+    # Enforce the allow-list: anything else is unwrapped (text kept)
     allowed = {"a", "p", "strong", "li", "i", "ul", "ol", "h1", "h2", "h3"}
-    for tag in soup_article.find_all(True):
+    for tag in work.find_all(True):
         if tag.name not in allowed:
             tag.unwrap()
 
-    # Ensure str return
-    result = str(soup_article)
-    return result if isinstance(result, str) else result.decode("utf-8", errors="replace")
+    # Render blocks in document order
+    blocks = []
+    for child in work.children:
+        name = getattr(child, "name", None)
+        if name in ("h1", "h2", "h3"):
+            if blocks:
+                blocks.append("")
+            blocks.append(f"<{name}>{normalise_whitespace(child.decode_contents())}</{name}>")
+        elif name == "p":
+            if child.get_text(strip=True):
+                blocks.append(f"<p>{normalise_whitespace(child.decode_contents())}</p>")
+        elif name in ("ol", "ul"):
+            items = [
+                f"<li>{normalise_whitespace(li.decode_contents())}</li>"
+                for li in child.find_all("li", recursive=False)
+            ]
+            if items:
+                blocks.append("<ol>\n" + "\n".join(items) + "\n</ol>")
+    return "\n".join(blocks)
 
 
 def build_download_folder_name(topic: str, resource_code: str) -> str:
@@ -318,7 +424,9 @@ def scrape_lesson(url: str, db: DB, code_gen: ResourceCodeGenerator, session: re
         print(f"    ERROR: {e}")
         return {"error": str(e), "http_status": getattr(e.response, "status_code", None)}
 
-    soup = BeautifulSoup(resp.text, "lxml")
+    # Parse bytes, not resp.text: the response carries no charset so requests
+    # would fall back to ISO-8859-1 and mangle the site's UTF-8 content.
+    soup = BeautifulSoup(resp.content, "lxml")
     http_status = resp.status_code
 
     topic = extract_topic(url)
@@ -530,11 +638,41 @@ def scrape_lesson(url: str, db: DB, code_gen: ResourceCodeGenerator, session: re
         return {"status": "failed", "error": str(e)}
 
 
+def refresh_lesson_body(url: str, db: DB, session: requests.Session) -> dict:
+    """
+    Re-fetch an existing lesson and update ONLY its body_html in place.
+
+    Used by --refresh-body: no assets are downloaded and no rows are inserted,
+    so re-running can never duplicate resources.
+    """
+    try:
+        resp = session.get(url, headers={"User-Agent": USER_AGENT}, timeout=30)
+        resp.raise_for_status()
+    except requests.RequestException as e:
+        return {"status": "failed", "error": str(e)}
+
+    body_html = extract_body_html(BeautifulSoup(resp.content, "lxml"))
+
+    row = db.conn.execute(
+        "SELECT uuid FROM resource WHERE source_url = ?", (url,)
+    ).fetchone()
+    if row is None:
+        return {"status": "failed", "error": "not in DB"}
+
+    db.update_resource(row["uuid"], {"body_html": body_html, "date_updated": NOW})
+    return {"status": "success", "uuid": row["uuid"]}
+
+
 def main():
     parser = argparse.ArgumentParser(description="esldiscussions.com scraper")
     parser.add_argument("--resume", action="store_true", help="Resume from last scraped")
     parser.add_argument("--limit", type=int, help="Max lessons to scrape")
     parser.add_argument("--update", action="store_true", help="Update mode (skip existing)")
+    parser.add_argument(
+        "--refresh-body",
+        action="store_true",
+        help="Re-fetch body_html for lessons already in DB (no downloads, no duplicates)",
+    )
     args = parser.parse_args()
 
     # Ensure output dirs exist
@@ -594,6 +732,17 @@ def main():
     for i, url in enumerate(urls[start_idx:], start=start_idx + 1):
         if args.limit and (i - start_idx) > args.limit:
             break
+
+        if args.refresh_body:
+            result = refresh_lesson_body(url, db, session)
+            if result.get("status") == "success":
+                success += 1
+                print(f"  [{i}/{len(urls)}] refreshed body_html: {url}")
+            else:
+                failed += 1
+                print(f"  [{i}/{len(urls)}] FAILED: {url} ({result.get('error')})")
+            time.sleep(random.uniform(0.2, 0.6))
+            continue
 
         if args.update and url in existing_urls:
             print(f"  [{i}/{len(urls)}] SKIP (already in DB): {url}")
